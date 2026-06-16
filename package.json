@@ -1,0 +1,44 @@
+{
+  "name": "@gticiane/oracle-provider",
+  "version": "2026.4.6",
+  "description": "OpenClaw Oracle OCI Generative AI provider plugin",
+  "type": "module",
+  "dependencies": {
+    "oci-common": "2.126.2",
+    "oci-generativeai": "2.126.2",
+    "oci-generativeaiinference": "2.126.2"
+  },
+  "devDependencies": {
+    "openclaw": "2026.4.6"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.4.6"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "openclaw": {
+    "bundle": {
+      "stageRuntimeDependencies": true
+    },
+    "extensions": [
+      "./index.ts"
+    ],
+    "install": {
+      "npmSpec": "@gticiane/oracle-provider",
+      "defaultChoice": "npm",
+      "minHostVersion": ">=2026.4.6"
+    },
+    "compat": {
+      "pluginApi": ">=2026.4.6"
+    },
+    "build": {
+      "openclawVersion": "2026.4.6"
+    },
+    "release": {
+      "publishToClawHub": true
+    }
+  }
+}
