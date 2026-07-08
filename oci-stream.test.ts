@@ -148,9 +148,11 @@ async function runOracleStream(params: {
       } as never,
       {
         apiKey: ORACLE_RUNTIME_AUTH,
-        temperature: params.options?.temperature ?? 0.2,
+        ...(typeof params.options?.temperature === "number"
+          ? { temperature: params.options.temperature }
+          : {}),
         maxTokens: params.options?.maxTokens ?? 256,
-        topP: params.options?.topP ?? 0.9,
+        ...(typeof params.options?.topP === "number" ? { topP: params.options.topP } : {}),
       } as never,
     ),
   );
@@ -471,6 +473,189 @@ describe("createOracleStreamFn routing", () => {
     }
   });
 
+  it("filters Gemini Flash Lite tools down to the explicitly named tool", async () => {
+    const { request } = await runOracleStream({
+      modelId: "google.gemini-2.5-flash-lite",
+      messages: [
+        {
+          role: "user",
+          content:
+            "Use exactly one tool, session_status, to report the current UTC time. Do not call any other tool.",
+        },
+      ],
+      tools: [
+        {
+          name: "session_status",
+          description: "Inspect the current session",
+          parameters: {
+            type: "object",
+            properties: {},
+          },
+        },
+        {
+          name: "read_file",
+          description: "Read a file",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+            },
+            required: ["path"],
+          },
+        },
+      ],
+      response: {
+        chatResult: {
+          modelId: "google.gemini-2.5-flash-lite",
+          chatResponse: {
+            apiFormat: "GENERIC",
+            choices: [
+              {
+                message: {
+                  role: "ASSISTANT",
+                  toolCalls: [
+                    {
+                      id: "call_1",
+                      type: "FUNCTION",
+                      name: "session_status",
+                      arguments: "{}",
+                    },
+                  ],
+                },
+                finishReason: "STOP",
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    const chatRequest = request.chatDetails?.chatRequest as {
+      tools?: Array<{ name?: string }>;
+      toolChoice?: { type?: string; name?: string };
+      isParallelToolCalls?: boolean;
+    };
+    expect(chatRequest.tools?.map((tool) => tool.name)).toEqual(["session_status"]);
+    expect(chatRequest.toolChoice).toEqual({ type: "FUNCTION", name: "session_status" });
+    expect(chatRequest.isParallelToolCalls).toBe(false);
+  });
+
+  it("removes Gemini Flash Lite tools when the prompt explicitly forbids tool use", async () => {
+    const { request } = await runOracleStream({
+      modelId: "google.gemini-2.5-flash-lite",
+      messages: [
+        {
+          role: "user",
+          content: 'Reply with exactly SIMPLE_OK and nothing else. Do not use any tools.',
+        },
+      ],
+      tools: [
+        {
+          name: "message",
+          description: "Send a message",
+          parameters: {
+            type: "object",
+            properties: {
+              action: { type: "string" },
+              message: { type: "string" },
+            },
+            required: ["action", "message"],
+          },
+        },
+      ],
+      response: {
+        chatResult: {
+          modelId: "google.gemini-2.5-flash-lite",
+          chatResponse: {
+            apiFormat: "GENERIC",
+            choices: [
+              {
+                message: {
+                  role: "ASSISTANT",
+                  content: [{ type: "TEXT", text: "SIMPLE_OK" }],
+                },
+                finishReason: "STOP",
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    const chatRequest = request.chatDetails?.chatRequest as {
+      tools?: Array<{ name?: string }>;
+      toolChoice?: { type?: string; name?: string };
+    };
+    expect(chatRequest.tools).toBeUndefined();
+    expect(chatRequest.toolChoice).toBeUndefined();
+  });
+
+  it("preserves the OpenClaw web_search tool on the generic path", async () => {
+    const { request } = await runOracleStream({
+      modelId: "google.gemini-2.5-flash",
+      systemPrompt: "Be concise.",
+      messages: [
+        {
+          role: "user",
+          content:
+            "Use the web_search tool exactly once to verify who is the current CEO of OpenAI as of today.",
+        },
+      ],
+      tools: [
+        {
+          name: "web_search",
+          description: "Search the web",
+          parameters: {
+            type: "object",
+            properties: {
+              query: { type: "string" },
+            },
+            required: ["query"],
+          },
+        },
+        {
+          name: "session_status",
+          description: "Inspect the current session",
+          parameters: {
+            type: "object",
+            properties: {},
+          },
+        },
+      ],
+      response: {
+        chatResult: {
+          modelId: "google.gemini-2.5-flash",
+          chatResponse: {
+            apiFormat: "GENERIC",
+            choices: [
+              {
+                message: {
+                  role: "ASSISTANT",
+                  content: [{ type: "TEXT", text: "Sam Altman — openai.com" }],
+                },
+                finishReason: "STOP",
+              },
+            ],
+          },
+        },
+      },
+      options: {
+        maxTokens: 64,
+      },
+    });
+
+    const chatRequest = request.chatDetails?.chatRequest as {
+      messages?: Array<{ role?: string; content?: Array<{ text?: string }> }>;
+      tools?: Array<{ name?: string }>;
+      maxTokens?: number;
+    };
+    expect(chatRequest.tools?.map((tool) => tool.name)).toEqual(["web_search", "session_status"]);
+    expect("webSearchOptions" in chatRequest).toBe(false);
+    expect(chatRequest.maxTokens).toBe(64);
+    expect(chatRequest.messages?.[0]?.role).toBe("SYSTEM");
+    expect(chatRequest.messages?.[0]?.content?.[0]?.text).toBe("Be concise.");
+  });
+
   it("uses COHERE formatting for all current Cohere v1 OCI aliases", async () => {
     const cohereV1ModelIds = [
       "cohere.command-r-08-2024",
@@ -536,6 +721,285 @@ describe("createOracleStreamFn routing", () => {
         },
       });
     }
+  });
+
+  it("defaults temperature to the minimum safe value when none is provided", async () => {
+    const { request } = await runOracleStream({
+      modelId: "google.gemini-2.5-flash",
+      messages: [{ role: "user", content: "hello" }],
+      response: {
+        chatResult: {
+          modelId: "google.gemini-2.5-flash",
+          chatResponse: {
+            apiFormat: "GENERIC",
+            choices: [
+              {
+                message: {
+                  role: "ASSISTANT",
+                  content: [{ type: "TEXT", text: "ok" }],
+                },
+                finishReason: "STOP",
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    const chatRequest = request.chatDetails?.chatRequest as {
+      temperature?: number;
+    };
+    expect(chatRequest.temperature).toBe(0);
+  });
+
+
+  it("omits explicit temperature for GPT-5-family Oracle OpenAI models", async () => {
+    const { request } = await runOracleStream({
+      modelId: "oracle/openai.gpt-5",
+      messages: [{ role: "user", content: "hello" }],
+      response: {
+        chatResult: {
+          modelId: "oracle/openai.gpt-5",
+          chatResponse: {
+            apiFormat: "GENERIC",
+            choices: [
+              {
+                message: {
+                  role: "ASSISTANT",
+                  content: [{ type: "TEXT", text: "ok" }],
+                },
+                finishReason: "STOP",
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    const chatRequest = request.chatDetails?.chatRequest as {
+      temperature?: number;
+    };
+    expect(chatRequest.temperature).toBeUndefined();
+  });
+
+  it("strips strict JSON Schema keywords that Gemini rejects from tool parameters", async () => {
+    const { request } = await runOracleStream({
+      modelId: "google.gemini-2.5-flash",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [
+        {
+          name: "complex_tool",
+          description: "A tool with strict JSON Schema constraints",
+          parameters: {
+            type: "object",
+            properties: {
+              value: {
+                type: "number",
+                minimum: 0,
+                exclusiveMinimum: 1,
+                maximum: 10,
+                exclusiveMaximum: 9,
+              },
+            },
+            required: ["value"],
+          },
+        },
+      ],
+      response: {
+        chatResult: {
+          modelId: "google.gemini-2.5-flash",
+          chatResponse: {
+            apiFormat: "GENERIC",
+            choices: [
+              {
+                message: {
+                  role: "ASSISTANT",
+                  content: [{ type: "TEXT", text: "ok" }],
+                },
+                finishReason: "STOP",
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    const chatRequest = request.chatDetails?.chatRequest as {
+      tools?: Array<{ parameters?: Record<string, unknown> }>;
+    };
+    expect(chatRequest.tools?.[0]?.parameters).toMatchObject({
+      type: "object",
+      properties: {
+        value: {
+          type: "number",
+        },
+      },
+      required: ["value"],
+    });
+    expect(JSON.stringify(chatRequest.tools?.[0]?.parameters)).not.toContain("exclusiveMinimum");
+    expect(JSON.stringify(chatRequest.tools?.[0]?.parameters)).not.toContain("exclusiveMaximum");
+  });
+
+  it("forces a high maxTokens budget for Cohere requests", async () => {
+    const cohereV1 = await runOracleStream({
+      modelId: "cohere.command-latest",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [
+        {
+          name: "lookup",
+          description: "Look something up",
+          parameters: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      ],
+      response: {
+        chatResult: {
+          modelId: "cohere.command-latest",
+          chatResponse: {
+            apiFormat: "COHERE",
+            text: "ok",
+            finishReason: "COMPLETE",
+            usage: {
+              promptTokens: 2,
+              completionTokens: 1,
+              totalTokens: 3,
+            },
+          },
+        },
+      },
+      options: {
+        maxTokens: 15,
+      },
+    });
+
+    const cohereV2 = await runOracleStream({
+      modelId: "cohere.command-a-03-2025",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [
+        {
+          name: "lookup",
+          description: "Look something up",
+          parameters: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      ],
+      response: {
+        chatResult: {
+          modelId: "cohere.command-a-03-2025",
+          chatResponse: {
+            apiFormat: "COHEREV2",
+            message: {
+              role: "ASSISTANT",
+              content: [{ type: "TEXT", text: "ok" }],
+            },
+            finishReason: "COMPLETE",
+            usage: {
+              promptTokens: 2,
+              completionTokens: 1,
+              totalTokens: 3,
+            },
+          },
+        },
+      },
+      options: {
+        maxTokens: 15,
+      },
+    });
+
+    const generic = await runOracleStream({
+      modelId: "google.gemini-2.5-pro",
+      messages: [{ role: "user", content: "hello" }],
+      response: {
+        chatResult: {
+          modelId: "google.gemini-2.5-pro",
+          chatResponse: {
+            apiFormat: "GENERIC",
+            choices: [
+              {
+                message: {
+                  role: "ASSISTANT",
+                  content: [{ type: "TEXT", text: "ok" }],
+                },
+                finishReason: "STOP",
+              },
+            ],
+          },
+        },
+      },
+      options: {
+        maxTokens: 15,
+      },
+    });
+
+    expect((cohereV1.request.chatDetails?.chatRequest as { maxTokens?: number }).maxTokens).toBe(256);
+    expect((cohereV2.request.chatDetails?.chatRequest as { maxTokens?: number }).maxTokens).toBe(256);
+    expect((generic.request.chatDetails?.chatRequest as { maxTokens?: number }).maxTokens).toBe(15);
+  });
+
+  it("keeps Cohere tool results in chatHistory when replaying a multistep turn", async () => {
+    const { request } = await runOracleStream({
+      modelId: "cohere.command-latest",
+      messages: [
+        { role: "user", content: "Use a tool to tell me the current UTC time." },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "I will check the current UTC time." },
+            { type: "toolCall", id: "call_1", name: "session_status", arguments: {} },
+          ],
+        },
+        {
+          role: "toolResult",
+          toolCallId: "call_1",
+          content: [{ type: "text", text: "UTC time is 15:34." }],
+        },
+      ],
+      response: {
+        chatResult: {
+          modelId: "cohere.command-latest",
+          chatResponse: {
+            apiFormat: "COHERE",
+            text: "Current UTC time is 15:34.",
+            finishReason: "COMPLETE",
+          },
+        },
+      },
+    });
+
+    const chatRequest = request.chatDetails?.chatRequest as {
+      message?: string;
+      chatHistory?: Array<Record<string, unknown>>;
+      toolResults?: Array<Record<string, unknown>>;
+    };
+
+    expect(chatRequest.message).toBe("");
+    expect(chatRequest.chatHistory).toEqual([
+      {
+        role: "CHATBOT",
+        message: "I will check the current UTC time.",
+        toolCalls: [
+          {
+            name: "session_status",
+            parameters: {},
+          },
+        ],
+      },
+    ]);
+    expect(chatRequest.toolResults).toEqual([
+      {
+        call: {
+          name: "session_status",
+          parameters: {},
+        },
+        outputs: [{ text: "UTC time is 15:34." }],
+      },
+    ]);
   });
 
   it("uses COHEREV2 formatting for all current Cohere v2 OCI aliases", async () => {
@@ -797,6 +1261,151 @@ describe("createOracleStreamFn response handling", () => {
     ]);
   });
 
+  it("parses Meta fallback tool-call text when Oracle returns only a bare invocation", async () => {
+    const { events } = await runOracleStream({
+      modelId: "meta.llama-4-maverick-17b-128e-instruct-fp8",
+      messages: [{ role: "user", content: "Use a tool." }],
+      tools: [
+        {
+          name: "session_status",
+          description: "Inspect the session state",
+          parameters: {
+            type: "object",
+            properties: {},
+          },
+        },
+      ],
+      response: {
+        chatResult: {
+          modelId: "meta.llama-4-maverick-17b-128e-instruct-fp8",
+          chatResponse: {
+            apiFormat: "GENERIC",
+            choices: [
+              {
+                message: {
+                  role: "ASSISTANT",
+                  content: [{ type: "TEXT", text: "session_status()" }],
+                },
+                finishReason: "STOP",
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    const doneEvent = getDoneEvent(events);
+    expect(doneEvent.reason).toBe("toolUse");
+    expect(doneEvent.message.stopReason).toBe("toolUse");
+    expect(doneEvent.message.content).toEqual([
+      {
+        type: "toolCall",
+        id: expect.stringMatching(/^oracle_call_/),
+        name: "session_status",
+        arguments: {},
+      },
+    ]);
+  });
+
+  it("parses Meta bracket fallback tool-call text when Oracle returns only a tool label", async () => {
+    const { events } = await runOracleStream({
+      modelId: "meta.llama-4-scout-17b-16e-instruct",
+      messages: [{ role: "user", content: "Use a tool." }],
+      tools: [
+        {
+          name: "session_status",
+          description: "Inspect the session state",
+          parameters: {
+            type: "object",
+            properties: {},
+          },
+        },
+      ],
+      response: {
+        chatResult: {
+          modelId: "meta.llama-4-scout-17b-16e-instruct",
+          chatResponse: {
+            apiFormat: "GENERIC",
+            choices: [
+              {
+                message: {
+                  role: "ASSISTANT",
+                  content: [{ type: "TEXT", text: "[session_status]" }],
+                },
+                finishReason: "STOP",
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    const doneEvent = getDoneEvent(events);
+    expect(doneEvent.reason).toBe("toolUse");
+    expect(doneEvent.message.stopReason).toBe("toolUse");
+    expect(doneEvent.message.content).toEqual([
+      {
+        type: "toolCall",
+        id: expect.stringMatching(/^oracle_call_/),
+        name: "session_status",
+        arguments: {},
+      },
+    ]);
+  });
+
+
+  it("parses Meta fallback tool-call text with named arguments for web_search", async () => {
+    const { events } = await runOracleStream({
+      modelId: "meta.llama-4-maverick-17b-128e-instruct-fp8",
+      messages: [{ role: "user", content: "Use web search." }],
+      tools: [
+        {
+          name: "web_search",
+          description: "Search the web",
+          parameters: {
+            type: "object",
+            properties: {
+              query: {
+                type: "string",
+                description: "Search query",
+              },
+            },
+            required: ["query"],
+          },
+        },
+      ],
+      response: {
+        chatResult: {
+          modelId: "meta.llama-4-maverick-17b-128e-instruct-fp8",
+          chatResponse: {
+            apiFormat: "GENERIC",
+            choices: [
+              {
+                message: {
+                  role: "ASSISTANT",
+                  content: [{ type: "TEXT", text: 'web_search(query="OpenAI current CEO today")' }],
+                },
+                finishReason: "STOP",
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    const doneEvent = getDoneEvent(events);
+    expect(doneEvent.reason).toBe("toolUse");
+    expect(doneEvent.message.stopReason).toBe("toolUse");
+    expect(doneEvent.message.content).toEqual([
+      {
+        type: "toolCall",
+        id: expect.stringMatching(/^oracle_call_/),
+        name: "web_search",
+        arguments: { query: "OpenAI current CEO today" },
+      },
+    ]);
+  });
+
   it("preserves Cohere v1 tool calling request and response handling", async () => {
     const { request, events } = await runOracleStream({
       modelId: "cohere.command-r-08-2024",
@@ -868,7 +1477,7 @@ describe("createOracleStreamFn response handling", () => {
     };
     expect(chatRequest).toMatchObject({
       apiFormat: "COHERE",
-      message: "Look up alpha.",
+      message: "",
       preambleOverride: "Be helpful.",
       chatHistory: [
         {
@@ -901,6 +1510,72 @@ describe("createOracleStreamFn response handling", () => {
         id: expect.stringMatching(/^oracle_call_/),
         name: "lookup",
         arguments: { query: "alpha" },
+      },
+    ]);
+  });
+
+  it("parses generic-style tool calls for cohere.command-latest responses", async () => {
+    const { events } = await runOracleStream({
+      modelId: "cohere.command-latest",
+      messages: [{ role: "user", content: "Look up gamma." }],
+      tools: [
+        {
+          name: "lookup",
+          description: "Look something up",
+          parameters: {
+            type: "object",
+            properties: {
+              query: {
+                type: "string",
+                description: "The query text",
+              },
+            },
+            required: ["query"],
+          },
+        },
+      ],
+      response: {
+        chatResult: {
+          modelId: "cohere.command-latest",
+          chatResponse: {
+            apiFormat: "COHERE",
+            choices: [
+              {
+                message: {
+                  role: "ASSISTANT",
+                  content: [{ type: "TEXT", text: "Calling the lookup tool." }],
+                  toolCalls: [
+                    {
+                      id: "call_latest",
+                      type: "FUNCTION",
+                      name: "lookup",
+                      arguments: '{"query":"gamma"}',
+                    },
+                  ],
+                },
+                finishReason: "TOOL_CALL",
+                usage: {
+                  promptTokens: 9,
+                  completionTokens: 3,
+                  totalTokens: 12,
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    const doneEvent = getDoneEvent(events);
+    expect(doneEvent.reason).toBe("toolUse");
+    expect(doneEvent.message.stopReason).toBe("toolUse");
+    expect(doneEvent.message.content).toEqual([
+      { type: "text", text: "Calling the lookup tool." },
+      {
+        type: "toolCall",
+        id: "call_latest",
+        name: "lookup",
+        arguments: { query: "gamma" },
       },
     ]);
   });

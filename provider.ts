@@ -20,6 +20,7 @@ import {
   ORACLE_PROVIDER_ID,
   resolveOracleAuth,
 } from "./oci-auth.js";
+import { ORACLE_GENERATIVE_AI_RETRY_CONFIGURATION } from "./oci-retry.js";
 import { isOracleCatalogModelVisible } from "./oci-routing.js";
 
 const ORACLE_BASE_URL = "oci://generative-ai";
@@ -208,7 +209,10 @@ async function listOracleModels(configFile: string, profile: string, compartment
     configFile,
     profile,
   });
-  const client = new GenerativeAiClient({ authenticationDetailsProvider });
+  const client = new GenerativeAiClient({
+    authenticationDetailsProvider,
+    retryConfiguration: ORACLE_GENERATIVE_AI_RETRY_CONFIGURATION,
+  });
   try {
     const models: OracleModelSummary[] = [];
     let page: string | undefined;

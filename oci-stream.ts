@@ -18,6 +18,7 @@ import {
   resolveStoredOracleAuth,
   type OracleResolvedAuth,
 } from "./oci-auth.js";
+import { ORACLE_GENERATIVE_AI_RETRY_CONFIGURATION } from "./oci-retry.js";
 import {
   resolveOracleModelRouting,
   type OracleChatApiFormat,
@@ -82,7 +83,7 @@ type OracleCohereChatHistoryMessage =
 
 type OracleCohereChatRequestShape = {
   apiFormat: "COHERE";
-  message: string;
+  message?: string;
   chatHistory?: OracleCohereChatHistoryMessage[];
   tools?: OracleCohereToolDefinition[];
   toolResults?: OracleCohereToolResult[];
@@ -144,6 +145,21 @@ type OracleChatChoice = {
       name?: string;
       arguments?: string;
     }>;
+    annotations?: Array<{
+      type?: string;
+      url?: string;
+    }>;
+    reasoningContent?: string;
+  };
+  groundingMetadata?: {
+    webSearchQueries?: string[];
+    groundingChunks?: Array<{
+      web?: {
+        uri?: string;
+        domain?: string;
+        title?: string;
+      };
+    }>;
   };
   finishReason?: string;
   usage?: OracleUsageShape;
@@ -155,12 +171,32 @@ type OracleChatResponseShape = {
   choices?: OracleChatChoice[];
 };
 
+type OracleCohereResponseToolCall = {
+  id?: string;
+  name?: string;
+  parameters?: Record<string, unknown> | string;
+  arguments?: string | Record<string, unknown>;
+  function?: {
+    name?: string;
+    arguments?: string | Record<string, unknown>;
+  };
+};
+
 type OracleCohereChatResponseShape = {
   apiFormat?: string;
   text?: string;
-  toolCalls?: Array<{
-    name?: string;
-    parameters?: Record<string, unknown>;
+  toolCalls?: OracleCohereResponseToolCall[];
+  message?: {
+    content?: Array<{ type?: string; text?: string }>;
+    toolCalls?: OracleCohereResponseToolCall[];
+  };
+  choices?: Array<{
+    message?: {
+      content?: Array<{ type?: string; text?: string }>;
+      toolCalls?: OracleCohereResponseToolCall[];
+    };
+    finishReason?: string;
+    usage?: OracleUsageShape;
   }>;
   finishReason?: string;
   usage?: OracleUsageShape;
@@ -196,6 +232,15 @@ type OracleGenericChatRequestShape = {
   maxTokens?: number;
   maxCompletionTokens?: number;
   tools?: OracleToolDefinition[];
+  toolChoice?:
+    | {
+        type: "AUTO";
+      }
+    | {
+        type: "FUNCTION";
+        name: string;
+      };
+  isParallelToolCalls?: boolean;
 };
 
 type OracleChatRequestShape =
@@ -234,6 +279,8 @@ const ORACLE_UNSUPPORTED_SCHEMA_KEYWORDS = new Set([
   "maxLength",
   "minimum",
   "maximum",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
   "multipleOf",
   "pattern",
   "format",
@@ -242,9 +289,27 @@ const ORACLE_UNSUPPORTED_SCHEMA_KEYWORDS = new Set([
   "uniqueItems",
   "minProperties",
   "maxProperties",
+  "prefixItems",
+  "contains",
+  "minContains",
+  "maxContains",
+  "propertyNames",
+  "dependentSchemas",
+  "dependentRequired",
+  "unevaluatedItems",
+  "unevaluatedProperties",
+  "contentEncoding",
+  "contentMediaType",
+  "contentSchema",
+  "if",
+  "then",
+  "else",
+  "not",
 ]);
 
 const ORACLE_SCHEMA_META_KEYS = ["description", "title", "default"] as const;
+const ORACLE_COHERE_DEFAULT_MAX_TOKENS = 256;
+const ORACLE_DEFAULT_TEMPERATURE = 0;
 
 function buildZeroUsage(): Usage {
   return {
@@ -811,13 +876,14 @@ function normalizeOracleCohereParameterDefinitions(
   return Object.keys(definitions).length > 0 ? definitions : undefined;
 }
 
-function buildAssistantMessage(params: {
+function buildAssistantMessage<TExtra extends Record<string, unknown> = Record<string, never>>(params: {
   model: { api: string; provider: string; id: string };
   content: AssistantMessage["content"];
   stopReason: StopReason;
   usage: Usage;
-}): AssistantMessage {
-  return {
+  extra?: TExtra;
+}): AssistantMessage & TExtra {
+  const base = {
     role: "assistant",
     content: params.content,
     stopReason: params.stopReason,
@@ -826,7 +892,8 @@ function buildAssistantMessage(params: {
     model: params.model.id,
     usage: params.usage,
     timestamp: Date.now(),
-  };
+  } satisfies AssistantMessage;
+  return params.extra ? Object.assign(base, params.extra) : (base as AssistantMessage & TExtra);
 }
 
 function buildErrorAssistantMessage(params: {
@@ -955,8 +1022,22 @@ function toOracleToolCallId(message: Message): string | undefined {
   return undefined;
 }
 
+function normalizeOracleModelIdForChecks(modelId: string | undefined): string | undefined {
+  const normalized = trimOracleString(modelId)?.toLowerCase();
+  return normalized || undefined;
+}
+
 function isOracleGeminiModelId(modelId: string | undefined): boolean {
-  return typeof modelId === "string" && modelId.startsWith("google.gemini-");
+  return normalizeOracleModelIdForChecks(modelId)?.startsWith("google.gemini-") ?? false;
+}
+
+function isOracleGeminiFlashLiteModelId(modelId: string | undefined): boolean {
+  const normalized = normalizeOracleModelIdForChecks(modelId);
+  return normalized === "google.gemini-2.5-flash-lite" || normalized === "oracle/google.gemini-2.5-flash-lite";
+}
+
+function isOracleMetaModelId(modelId: string | undefined): boolean {
+  return normalizeOracleModelIdForChecks(modelId)?.startsWith("meta.") ?? false;
 }
 
 function isOracleToolOutputMessage(message: Message | undefined): message is Message {
@@ -1099,6 +1180,88 @@ export function convertPiMessagesToOracleMessages(params: {
   return oracleMessages;
 }
 
+function getOracleLatestUserMessageText(messages: Message[]): string | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index] as Message | undefined;
+    if (message?.role !== "user") {
+      continue;
+    }
+    const text = toTextParts(message.content).join("\n").trim();
+    if (text) {
+      return text;
+    }
+  }
+  return undefined;
+}
+
+function escapeOracleRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function doesOraclePromptMentionTool(promptText: string | undefined, toolName: string): boolean {
+  const normalizedPrompt = trimOracleString(promptText)?.toLowerCase();
+  const normalizedTool = trimOracleString(toolName)?.toLowerCase();
+  if (!normalizedPrompt || !normalizedTool) {
+    return false;
+  }
+  const pattern = escapeOracleRegExp(normalizedTool).replaceAll("_", "[_\\s-]*");
+  return new RegExp(`(^|[^a-z0-9])${pattern}([^a-z0-9]|$)`, "i").test(normalizedPrompt);
+}
+
+function doesOraclePromptForbidTools(promptText: string | undefined): boolean {
+  const normalizedPrompt = trimOracleString(promptText)?.toLowerCase();
+  if (!normalizedPrompt) {
+    return false;
+  }
+  return (
+    /\bdo not use any tools\b/.test(normalizedPrompt) ||
+    /\bdon't use any tools\b/.test(normalizedPrompt) ||
+    /\bdo not call any tools\b/.test(normalizedPrompt) ||
+    /\bdon't call any tools\b/.test(normalizedPrompt)
+  );
+}
+
+type OracleTurnToolSelection = {
+  tools?: Tool[];
+  toolChoice?: OracleGenericChatRequestShape["toolChoice"];
+};
+
+function selectOracleToolsForTurn(params: {
+  modelId?: string;
+  tools?: Tool[];
+  latestUserText?: string;
+}): OracleTurnToolSelection {
+  const availableTools = (params.tools ?? []).filter(
+    (tool): tool is Tool => typeof tool.name === "string" && tool.name.trim().length > 0,
+  );
+  if (availableTools.length === 0) {
+    return {};
+  }
+  if (!isOracleGeminiFlashLiteModelId(params.modelId)) {
+    return {
+      tools: availableTools,
+      toolChoice: { type: "AUTO" },
+    };
+  }
+  if (doesOraclePromptForbidTools(params.latestUserText)) {
+    return {};
+  }
+  const explicitlyNamedTools = availableTools.filter((tool) =>
+    doesOraclePromptMentionTool(params.latestUserText, tool.name),
+  );
+  const selectedTools = explicitlyNamedTools.length > 0 ? explicitlyNamedTools : availableTools;
+  if (selectedTools.length === 1) {
+    return {
+      tools: selectedTools,
+      toolChoice: { type: "FUNCTION", name: selectedTools[0].name },
+    };
+  }
+  return {
+    tools: selectedTools,
+    toolChoice: { type: "AUTO" },
+  };
+}
+
 function convertGenericTools(tools: Tool[] | undefined): OracleToolDefinition[] | undefined {
   if (!tools || tools.length === 0) {
     return undefined;
@@ -1189,7 +1352,82 @@ function parseOracleToolArgumentsValue(
   return parseToolArguments(typeof value === "string" ? value : undefined);
 }
 
+function getOracleCohereResponseChoice(
+  response: OracleCohereChatResponseShape,
+): OracleCohereChatResponseShape["choices"] extends Array<infer T> ? T | undefined : undefined {
+  return response.choices?.[0];
+}
+
+function extractOracleCohereAssistantText(response: OracleCohereChatResponseShape): string | undefined {
+  const choice = getOracleCohereResponseChoice(response);
+  return (
+    trimOracleString(response.text) ??
+    extractOracleText(response.message?.content) ??
+    extractOracleText(choice?.message?.content)
+  );
+}
+
+function extractOracleCohereToolCalls(
+  response: OracleCohereChatResponseShape,
+): OracleCohereResponseToolCall[] {
+  const choice = getOracleCohereResponseChoice(response);
+  return response.toolCalls ?? response.message?.toolCalls ?? choice?.message?.toolCalls ?? [];
+}
+
+function extractOracleCohereFinishReason(
+  response: OracleCohereChatResponseShape,
+): string | undefined {
+  const choice = getOracleCohereResponseChoice(response);
+  return normalizeOracleFinishReason(response.finishReason ?? choice?.finishReason);
+}
+
+function extractOracleCohereUsage(response: OracleCohereChatResponseShape): OracleUsageShape | undefined {
+  const choice = getOracleCohereResponseChoice(response);
+  return response.usage ?? choice?.usage;
+}
+
+function normalizeOracleCohereToolCallName(toolCall: OracleCohereResponseToolCall): string {
+  return trimOracleString(toolCall.name) ?? trimOracleString(toolCall.function?.name) ?? "tool";
+}
+
+function normalizeOracleCohereToolCallArguments(
+  toolCall: OracleCohereResponseToolCall,
+): Record<string, unknown> {
+  if (toolCall.parameters && typeof toolCall.parameters === "object" && !Array.isArray(toolCall.parameters)) {
+    return toolCall.parameters;
+  }
+  if (typeof toolCall.parameters === "string") {
+    return parseToolArguments(toolCall.parameters);
+  }
+  return parseOracleToolArgumentsValue(toolCall.arguments ?? toolCall.function?.arguments);
+}
+
+function normalizeOracleCohereMaxTokens(maxTokens: number | undefined): number {
+  return typeof maxTokens === "number"
+    ? Math.max(maxTokens, ORACLE_COHERE_DEFAULT_MAX_TOKENS)
+    : ORACLE_COHERE_DEFAULT_MAX_TOKENS;
+}
+
+function isOracleDefaultOnlyTemperatureModel(modelId: string | undefined): boolean {
+  const normalized = trimOracleString(modelId)?.toLowerCase();
+  return normalized?.startsWith("openai.gpt-5") || normalized?.startsWith("oracle/openai.gpt-5") || false;
+}
+
+function normalizeOracleTemperature(
+  modelId: string | undefined,
+  value: number | undefined,
+): number | undefined {
+  if (isOracleDefaultOnlyTemperatureModel(modelId)) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return ORACLE_DEFAULT_TEMPERATURE;
+  }
+  return Math.max(value, ORACLE_DEFAULT_TEMPERATURE);
+}
+
 function buildOracleSharedChatOptions(params: {
+  modelId?: string;
   temperature?: number;
   topP?: number;
   maxTokens?: number;
@@ -1200,8 +1438,9 @@ function buildOracleSharedChatOptions(params: {
   maxTokens?: number;
   maxCompletionTokens?: number;
 } {
+  const normalizedTemperature = normalizeOracleTemperature(params.modelId, params.temperature);
   return {
-    ...(typeof params.temperature === "number" ? { temperature: params.temperature } : {}),
+    ...(typeof normalizedTemperature === "number" ? { temperature: normalizedTemperature } : {}),
     ...(typeof params.topP === "number" ? { topP: params.topP } : {}),
     ...(typeof params.maxTokens === "number"
       ? params.outputTokenField === "maxCompletionTokens"
@@ -1265,7 +1504,12 @@ function buildOracleGenericChatRequest(params: {
   maxTokens?: number;
   outputTokenField: OracleOutputTokenField;
 }): OracleGenericChatRequestShape {
-  const convertedTools = convertGenericTools(params.tools);
+  const toolSelection = selectOracleToolsForTurn({
+    modelId: params.modelId,
+    tools: params.tools,
+    latestUserText: getOracleLatestUserMessageText(params.messages),
+  });
+  const convertedTools = convertGenericTools(toolSelection.tools);
   return {
     apiFormat: "GENERIC",
     isStream: false,
@@ -1274,8 +1518,20 @@ function buildOracleGenericChatRequest(params: {
       messages: params.messages,
       modelId: params.modelId,
     }),
-    ...buildOracleSharedChatOptions(params),
-    ...(convertedTools ? { tools: convertedTools } : {}),
+    ...buildOracleSharedChatOptions({
+      modelId: params.modelId,
+      temperature: params.temperature,
+      topP: params.topP,
+      maxTokens: params.maxTokens,
+      outputTokenField: params.outputTokenField,
+    }),
+    ...(convertedTools
+      ? {
+          tools: convertedTools,
+          toolChoice: toolSelection.toolChoice ?? { type: "AUTO" as const },
+          isParallelToolCalls: false,
+        }
+      : {}),
   };
 }
 
@@ -1367,7 +1623,7 @@ function buildOracleCohereChatRequest(params: {
   if (lastUserHistoryIndex >= 0) {
     const lastUserEntry = chatHistory[lastUserHistoryIndex];
     if (lastUserEntry?.role === "USER") {
-      currentMessage = lastUserEntry.message;
+      currentMessage = toolResults ? "" : lastUserEntry.message;
       chatHistory.splice(lastUserHistoryIndex, 1);
     }
   }
@@ -1383,7 +1639,10 @@ function buildOracleCohereChatRequest(params: {
       ? { preambleOverride: params.systemPrompt?.trim() }
       : {}),
     isStream: false,
-    ...buildOracleSharedChatOptions(params),
+    ...buildOracleSharedChatOptions({
+      ...params,
+      maxTokens: normalizeOracleCohereMaxTokens(params.maxTokens),
+    }),
   };
 }
 
@@ -1409,7 +1668,10 @@ function buildOracleCohereV2ChatRequest(params: {
     messages,
     ...(convertedTools ? { tools: convertedTools } : {}),
     isStream: false,
-    ...buildOracleSharedChatOptions(params),
+    ...buildOracleSharedChatOptions({
+      ...params,
+      maxTokens: normalizeOracleCohereMaxTokens(params.maxTokens),
+    }),
   };
 }
 
@@ -1462,17 +1724,281 @@ function normalizeOracleResponseApiFormat(value: unknown): OracleChatApiFormat |
   }
 }
 
+function buildOracleToolNameMap(tools: Tool[] | undefined): Map<string, string> {
+  const names = new Map<string, string>();
+  for (const tool of tools ?? []) {
+    const trimmed = trimOracleString(tool.name);
+    if (!trimmed) {
+      continue;
+    }
+    names.set(trimmed.toLowerCase(), trimmed);
+  }
+  return names;
+}
+
+
+function splitOracleMetaNamedArguments(rawArguments: string): string[] | undefined {
+  const parts: string[] = [];
+  let current = "";
+  let curlyDepth = 0;
+  let squareDepth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escaped = false;
+
+  for (const char of rawArguments) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      current += char;
+      escaped = true;
+      continue;
+    }
+
+    if (inSingleQuote) {
+      current += char;
+      if (char === "'") {
+        inSingleQuote = false;
+      }
+      continue;
+    }
+
+    if (inDoubleQuote) {
+      current += char;
+      if (char === '"') {
+        inDoubleQuote = false;
+      }
+      continue;
+    }
+
+    if (char === "'") {
+      current += char;
+      inSingleQuote = true;
+      continue;
+    }
+
+    if (char === '"') {
+      current += char;
+      inDoubleQuote = true;
+      continue;
+    }
+
+    if (char === "{") {
+      curlyDepth += 1;
+      current += char;
+      continue;
+    }
+
+    if (char === "}") {
+      curlyDepth -= 1;
+      current += char;
+      continue;
+    }
+
+    if (char === "[") {
+      squareDepth += 1;
+      current += char;
+      continue;
+    }
+
+    if (char === "]") {
+      squareDepth -= 1;
+      current += char;
+      continue;
+    }
+
+    if (char === "," && curlyDepth === 0 && squareDepth === 0) {
+      const trimmed = current.trim();
+      if (!trimmed) {
+        return undefined;
+      }
+      parts.push(trimmed);
+      current = "";
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (escaped || inSingleQuote || inDoubleQuote || curlyDepth !== 0 || squareDepth !== 0) {
+    return undefined;
+  }
+
+  const trimmed = current.trim();
+  if (!trimmed) {
+    return parts.length > 0 ? undefined : [];
+  }
+  parts.push(trimmed);
+  return parts;
+}
+
+function parseOracleMetaNamedArgumentValue(rawValue: string): unknown {
+  const trimmed = rawValue.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  if (
+    (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+    (trimmed.startsWith("[") && trimmed.endsWith("]"))
+  ) {
+    try {
+      return JSON.parse(trimmed) as unknown;
+    } catch {
+      return trimmed;
+    }
+  }
+
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try {
+      return JSON.parse(trimmed) as unknown;
+    } catch {
+      return trimmed.slice(1, -1);
+    }
+  }
+
+  if (trimmed.startsWith("'") && trimmed.endsWith("'")) {
+    return trimmed
+      .slice(1, -1)
+      .replace(/\\'/g, "'")
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, "\\");
+  }
+
+  if (trimmed === "true") {
+    return true;
+  }
+  if (trimmed === "false") {
+    return false;
+  }
+  if (trimmed === "null") {
+    return null;
+  }
+  if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) {
+    return Number(trimmed);
+  }
+
+  return trimmed;
+}
+
+function parseOracleMetaFallbackArguments(rawArguments: string): Record<string, unknown> | undefined {
+  const trimmed = rawArguments.trim();
+  if (!trimmed) {
+    return {};
+  }
+
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    return parseToolArguments(trimmed);
+  }
+
+  const namedArguments = splitOracleMetaNamedArguments(trimmed);
+  if (!namedArguments) {
+    return undefined;
+  }
+
+  const argumentsObject: Record<string, unknown> = {};
+  for (const part of namedArguments) {
+    const match = part.match(/^([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*([\s\S]+)$/);
+    if (!match?.[1] || !match[2]) {
+      return undefined;
+    }
+    argumentsObject[match[1]] = parseOracleMetaNamedArgumentValue(match[2]);
+  }
+  return argumentsObject;
+}
+
+function tryParseOracleMetaTextualToolCall(params: {
+  modelId: string;
+  text: string | undefined;
+  tools: Tool[] | undefined;
+}): { toolCalls: ToolCall[]; omitText: boolean } | undefined {
+  if (!isOracleMetaModelId(params.modelId)) {
+    return undefined;
+  }
+
+  const text = trimOracleString(params.text);
+  if (!text || text.length > 240) {
+    return undefined;
+  }
+
+  const toolNameMap = buildOracleToolNameMap(params.tools);
+  if (toolNameMap.size === 0) {
+    return undefined;
+  }
+
+  const bracketMatch = text.match(/^\[\s*([A-Za-z_][A-Za-z0-9_-]*)\s*\]$/);
+  if (bracketMatch?.[1]) {
+    const toolName = toolNameMap.get(bracketMatch[1].toLowerCase());
+    if (!toolName) {
+      return undefined;
+    }
+    return {
+      omitText: true,
+      toolCalls: [
+        {
+          type: "toolCall",
+          id: `oracle_call_${randomUUID()}`,
+          name: toolName,
+          arguments: {},
+        },
+      ],
+    };
+  }
+
+  const functionMatch = text.match(/^([A-Za-z_][A-Za-z0-9_-]*)\(([\s\S]*)\)$/);
+  if (!functionMatch?.[1]) {
+    return undefined;
+  }
+
+  const toolName = toolNameMap.get(functionMatch[1].toLowerCase());
+  if (!toolName) {
+    return undefined;
+  }
+
+  const rawArguments = functionMatch[2]?.trim() ?? "";
+  const argumentsObject = parseOracleMetaFallbackArguments(rawArguments);
+  if (!argumentsObject) {
+    return undefined;
+  }
+
+  return {
+    omitText: true,
+    toolCalls: [
+      {
+        type: "toolCall",
+        id: `oracle_call_${randomUUID()}`,
+        name: toolName,
+        arguments: argumentsObject,
+      },
+    ],
+  };
+}
+
 function convertGenericOracleChatResultToAssistantMessage(
   response: OracleChatResponseShape,
   model: { api: string; provider: string; id: string },
+  tools: Tool[] | undefined,
 ): AssistantMessage {
   const choice = response.choices?.[0];
   const assistantMessage = choice?.message;
   const assistantText = extractOracleText(assistantMessage?.content);
-  const toolCalls = assistantMessage?.toolCalls ?? [];
+  const structuredToolCalls = assistantMessage?.toolCalls ?? [];
+  const fallbackTextualToolCalls =
+    structuredToolCalls.length === 0
+      ? tryParseOracleMetaTextualToolCall({
+          modelId: model.id,
+          text: assistantText,
+          tools,
+        })
+      : undefined;
+  const toolCalls = structuredToolCalls;
 
   const content: Array<{ type: "text"; text: string } | ToolCall> = [];
-  if (assistantText) {
+  if (assistantText && !fallbackTextualToolCalls?.omitText) {
     content.push({ type: "text", text: assistantText });
   }
 
@@ -1488,10 +2014,17 @@ function convertGenericOracleChatResultToAssistantMessage(
       arguments: parseToolArguments(toolCall.arguments),
     });
   }
+  for (const toolCall of fallbackTextualToolCalls?.toolCalls ?? []) {
+    content.push(toolCall);
+  }
 
   const finishReason = normalizeOracleFinishReason(choice?.finishReason);
   const stopReason: StopReason =
-    toolCalls.length > 0 ? "toolUse" : isOracleLengthFinishReason(finishReason) ? "length" : "stop";
+    toolCalls.length > 0 || (fallbackTextualToolCalls?.toolCalls.length ?? 0) > 0
+      ? "toolUse"
+      : isOracleLengthFinishReason(finishReason)
+        ? "length"
+        : "stop";
 
   return buildAssistantMessage({
     model,
@@ -1506,24 +2039,24 @@ function convertCohereOracleChatResultToAssistantMessage(
   model: { api: string; provider: string; id: string },
 ): AssistantMessage {
   const content: Array<{ type: "text"; text: string } | ToolCall> = [];
-  const assistantText = trimOracleString(response.text);
+  const assistantText = extractOracleCohereAssistantText(response);
   if (assistantText) {
     content.push({ type: "text", text: assistantText });
   }
 
-  for (const toolCall of response.toolCalls ?? []) {
+  const toolCalls = extractOracleCohereToolCalls(response);
+  for (const toolCall of toolCalls) {
     content.push({
       type: "toolCall",
-      id: `oracle_call_${randomUUID()}`,
-      name: trimOracleString(toolCall.name) ?? "tool",
-      arguments:
-        toolCall.parameters && typeof toolCall.parameters === "object" ? toolCall.parameters : {},
+      id: trimOracleString(toolCall.id) ?? `oracle_call_${randomUUID()}`,
+      name: normalizeOracleCohereToolCallName(toolCall),
+      arguments: normalizeOracleCohereToolCallArguments(toolCall),
     });
   }
 
-  const finishReason = normalizeOracleFinishReason(response.finishReason);
+  const finishReason = extractOracleCohereFinishReason(response);
   const stopReason: StopReason =
-    (response.toolCalls?.length ?? 0) > 0 || isOracleToolUseFinishReason(finishReason)
+    toolCalls.length > 0 || isOracleToolUseFinishReason(finishReason)
       ? "toolUse"
       : isOracleLengthFinishReason(finishReason)
         ? "length"
@@ -1533,7 +2066,7 @@ function convertCohereOracleChatResultToAssistantMessage(
     model,
     content,
     stopReason,
-    usage: buildUsage(response.usage),
+    usage: buildUsage(extractOracleCohereUsage(response)),
   });
 }
 
@@ -1582,6 +2115,7 @@ function convertCohereV2OracleChatResultToAssistantMessage(
 export function convertOracleChatResultToAssistantMessage(
   chatResult: OracleChatResultShape,
   model: { api: string; provider: string; id: string },
+  tools?: Tool[],
 ): AssistantMessage {
   const response = chatResult.chatResponse;
   const apiFormat =
@@ -1603,6 +2137,7 @@ export function convertOracleChatResultToAssistantMessage(
   return convertGenericOracleChatResultToAssistantMessage(
     (response ?? {}) as OracleChatResponseShape,
     model,
+    tools,
   );
 }
 
@@ -1611,7 +2146,10 @@ function createDefaultOracleInferenceClient(auth: OracleResolvedAuth): OracleInf
     configFile: auth.configFile,
     profile: auth.profile,
   });
-  return new GenerativeAiInferenceClient({ authenticationDetailsProvider });
+  return new GenerativeAiInferenceClient({
+    authenticationDetailsProvider,
+    retryConfiguration: ORACLE_GENERATIVE_AI_RETRY_CONFIGURATION,
+  });
 }
 
 function resolveOracleStreamAuth(params: {
@@ -1692,11 +2230,15 @@ export function createOracleStreamFn(
           throw new Error("Oracle OCI returned an empty chat response.");
         }
 
-        const assistantMessage = convertOracleChatResultToAssistantMessage(chatResult, {
-          api: model.api,
-          provider: model.provider,
-          id: model.id,
-        });
+        const assistantMessage = convertOracleChatResultToAssistantMessage(
+          chatResult,
+          {
+            api: model.api,
+            provider: model.provider,
+            id: model.id,
+          },
+          context.tools,
+        );
 
         const reason: Extract<StopReason, "stop" | "length" | "toolUse"> =
           assistantMessage.stopReason === "toolUse"
