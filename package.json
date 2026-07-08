@@ -1,6 +1,6 @@
 {
   "name": "@gticiane/oracle-genai",
-  "version": "2026.4.8",
+  "version": "2026.4.9",
   "description": "OpenClaw Oracle GenAI provider plugin",
   "type": "module",
   "scripts": {
