@@ -11,7 +11,7 @@ import {
   normalizeModelCompat,
   type ModelDefinitionConfig,
 } from "openclaw/plugin-sdk/provider-model-shared";
-import { logWarn } from "openclaw/plugin-sdk/text-runtime";
+import { createSubsystemLogger } from "openclaw/plugin-sdk/logging-core";
 import {
   createOracleAuthenticationDetailsProvider,
   buildOracleRuntimeAuthToken,
@@ -24,6 +24,8 @@ import { ORACLE_GENERATIVE_AI_RETRY_CONFIGURATION } from "./oci-retry.js";
 import { isOracleCatalogModelVisible } from "./oci-routing.js";
 
 const ORACLE_BASE_URL = "oci://generative-ai";
+
+const log = createSubsystemLogger("oracle");
 
 type OracleModelSummary = {
   id?: string;
@@ -245,7 +247,7 @@ function handleOracleCatalogDiscoveryError(error: unknown): null | undefined {
   }
 
   const message = error.message.trim() || "unknown error";
-  logWarn(`oracle: catalog discovery failed, skipping provider: ${message}`);
+  log.warn(`catalog discovery failed, skipping provider: ${message}`);
   return null;
 }
 

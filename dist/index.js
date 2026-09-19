@@ -30683,7 +30683,7 @@ var require_node = __commonJS({
     var tty = __require("tty");
     var util = __require("util");
     exports.init = init;
-    exports.log = log;
+    exports.log = log2;
     exports.formatArgs = formatArgs;
     exports.save = save;
     exports.load = load;
@@ -30818,7 +30818,7 @@ var require_node = __commonJS({
       }
       return (/* @__PURE__ */ new Date()).toISOString() + " ";
     }
-    function log(...args) {
+    function log2(...args) {
       return process.stderr.write(util.formatWithOptions(exports.inspectOpts, ...args) + "\n");
     }
     function save(namespaces) {
@@ -40257,7 +40257,7 @@ var require_logging_utils = __commonJS({
     exports.getDebugBackend = getDebugBackend;
     exports.getStructuredBackend = getStructuredBackend;
     exports.setBackend = setBackend;
-    exports.log = log;
+    exports.log = log2;
     var events_1 = __require("events");
     var process2 = __importStar(__require("process"));
     var util = __importStar(__require("util"));
@@ -40289,7 +40289,7 @@ var require_logging_utils = __commonJS({
         this.func.info = (...args) => this.invokeSeverity(LogSeverity.INFO, ...args);
         this.func.warn = (...args) => this.invokeSeverity(LogSeverity.WARNING, ...args);
         this.func.error = (...args) => this.invokeSeverity(LogSeverity.ERROR, ...args);
-        this.func.sublog = (namespace2) => log(namespace2, this.func);
+        this.func.sublog = (namespace2) => log2(namespace2, this.func);
       }
       invoke(fields, ...args) {
         if (this.upstream) {
@@ -40456,7 +40456,7 @@ var require_logging_utils = __commonJS({
       cachedBackend = backend;
       loggerCache.clear();
     }
-    function log(namespace, parent) {
+    function log2(namespace, parent) {
       if (!cachedBackend) {
         const enablesFlag = process2.env[exports.env.nodeEnables];
         if (!enablesFlag) {
@@ -40589,7 +40589,7 @@ var require_src4 = __commonJS({
     exports.HEADER_NAME = "Metadata-Flavor";
     exports.HEADER_VALUE = "Google";
     exports.HEADERS = Object.freeze({ [exports.HEADER_NAME]: exports.HEADER_VALUE });
-    var log = logger.log("gcp-metadata");
+    var log2 = logger.log("gcp-metadata");
     exports.METADATA_SERVER_DETECTION = Object.freeze({
       "assume-present": "don't try to ping the metadata server, but assume it's present",
       none: "don't try to ping the metadata server, but don't try to use it either",
@@ -40652,9 +40652,9 @@ var require_src4 = __commonJS({
         responseType: "text",
         timeout: requestTimeout()
       };
-      log.info("instance request %j", req);
+      log2.info("instance request %j", req);
       const res = await requestMethod(req);
-      log.info("instance metadata is %s", res.data);
+      log2.info("instance metadata is %s", res.data);
       const metadataFlavor = res.headers.get(exports.HEADER_NAME);
       if (metadataFlavor !== exports.HEADER_VALUE) {
         throw new RangeError(`Invalid response from metadata service: incorrect ${exports.HEADER_NAME} header. Expected '${exports.HEADER_VALUE}', got ${metadataFlavor ? `'${metadataFlavor}'` : "no header"}`);
@@ -115684,11 +115684,11 @@ var require_core = __commonJS({
     Ajv2.ValidationError = validation_error_1.default;
     Ajv2.MissingRefError = ref_error_1.default;
     exports.default = Ajv2;
-    function checkOptions(checkOpts, options, msg, log = "error") {
+    function checkOptions(checkOpts, options, msg, log2 = "error") {
       for (const key in checkOpts) {
         const opt = key;
         if (opt in options)
-          this.logger[log](`${msg}: option ${key}. ${checkOpts[opt]}`);
+          this.logger[log2](`${msg}: option ${key}. ${checkOpts[opt]}`);
       }
     }
     function getSchEnv(keyRef) {
@@ -120421,8 +120421,9 @@ import {
   DEFAULT_CONTEXT_TOKENS,
   normalizeModelCompat
 } from "openclaw/plugin-sdk/provider-model-shared";
-import { logWarn } from "openclaw/plugin-sdk/text-runtime";
+import { createSubsystemLogger } from "openclaw/plugin-sdk/logging-core";
 var ORACLE_BASE_URL = "oci://generative-ai";
+var log = createSubsystemLogger("oracle");
 function trimToUndefined2(value) {
   if (typeof value !== "string") {
     return void 0;
@@ -120566,7 +120567,7 @@ function handleOracleCatalogDiscoveryError(error) {
     return null;
   }
   const message = error.message.trim() || "unknown error";
-  logWarn(`oracle: catalog discovery failed, skipping provider: ${message}`);
+  log.warn(`catalog discovery failed, skipping provider: ${message}`);
   return null;
 }
 async function resolveOracleCatalogProvider(ctx) {
