@@ -955,6 +955,19 @@ function toOracleTextBlocks(content: unknown): OracleTextBlock[] | undefined {
   return text ? [{ type: "TEXT", text }] : undefined;
 }
 
+// Oracle rejects anything outside this set with "Image is corrupted or
+// unreadable", which fails the whole turn. Unsupported types fall back to the
+// previous placeholder behaviour instead.
+const ORACLE_SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/jpg"]);
+
+function normalizeOracleImageMimeType(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase().split(";")[0];
+  return normalized ? normalized : undefined;
+}
+
 function toOracleImageBlock(block: {
   data?: unknown;
   mimeType?: unknown;
@@ -963,11 +976,20 @@ function toOracleImageBlock(block: {
   if (!data) {
     return undefined;
   }
-  // Already a data URI (or a remote URI the service accepts): forward as-is.
-  const url = data.startsWith("data:")
-    ? data
-    : `data:${typeof block.mimeType === "string" && block.mimeType ? block.mimeType : "image/png"};base64,${data}`;
-  return { type: "IMAGE", imageUrl: { url, detail: "AUTO" } };
+
+  if (data.startsWith("data:")) {
+    const declared = normalizeOracleImageMimeType(data.slice("data:".length).split(",")[0]);
+    if (!declared || !ORACLE_SUPPORTED_IMAGE_MIME_TYPES.has(declared)) {
+      return undefined;
+    }
+    return { type: "IMAGE", imageUrl: { url: data, detail: "AUTO" } };
+  }
+
+  const mimeType = normalizeOracleImageMimeType(block.mimeType);
+  if (!mimeType || !ORACLE_SUPPORTED_IMAGE_MIME_TYPES.has(mimeType)) {
+    return undefined;
+  }
+  return { type: "IMAGE", imageUrl: { url: `data:${mimeType};base64,${data}`, detail: "AUTO" } };
 }
 
 /**

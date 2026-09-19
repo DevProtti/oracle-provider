@@ -255,6 +255,47 @@ describe("convertPiMessagesToOracleMessages", () => {
     ]);
   });
 
+  it("falls back to a placeholder for image types Oracle cannot decode", () => {
+    const oracleMessages = convertPiMessagesToOracleMessages({
+      modelId: "openai.gpt-5.5",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "What is this?" },
+            { type: "image", data: "UklGRg==", mimeType: "image/webp" },
+          ],
+        },
+      ] as never,
+    });
+
+    expect(oracleMessages).toEqual([
+      {
+        role: "USER",
+        content: [{ type: "TEXT", text: "What is this?\n[Image omitted]" }],
+      },
+    ]);
+  });
+
+  it("rejects an unsupported type declared inside a data URI", () => {
+    const oracleMessages = convertPiMessagesToOracleMessages({
+      modelId: "openai.gpt-5.5",
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "image", data: "data:image/webp;base64,UklGRg==", mimeType: "image/webp" }],
+        },
+      ] as never,
+    });
+
+    expect(oracleMessages).toEqual([
+      {
+        role: "USER",
+        content: [{ type: "TEXT", text: "[Image omitted]" }],
+      },
+    ]);
+  });
+
   it("pairs Gemini tool calls with tool results when the model ref is family-detectable", () => {
     const oracleMessages = convertPiMessagesToOracleMessages({
       modelId: "google.gemini-2.5-pro",

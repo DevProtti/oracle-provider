@@ -119448,13 +119448,31 @@ function toOracleTextBlocks(content) {
   const text = toTextParts(content).join("\n").trim();
   return text ? [{ type: "TEXT", text }] : void 0;
 }
+var ORACLE_SUPPORTED_IMAGE_MIME_TYPES = /* @__PURE__ */ new Set(["image/png", "image/jpeg", "image/jpg"]);
+function normalizeOracleImageMimeType(value) {
+  if (typeof value !== "string") {
+    return void 0;
+  }
+  const normalized = value.trim().toLowerCase().split(";")[0];
+  return normalized ? normalized : void 0;
+}
 function toOracleImageBlock(block) {
   const data = typeof block.data === "string" ? block.data.trim() : "";
   if (!data) {
     return void 0;
   }
-  const url = data.startsWith("data:") ? data : `data:${typeof block.mimeType === "string" && block.mimeType ? block.mimeType : "image/png"};base64,${data}`;
-  return { type: "IMAGE", imageUrl: { url, detail: "AUTO" } };
+  if (data.startsWith("data:")) {
+    const declared = normalizeOracleImageMimeType(data.slice("data:".length).split(",")[0]);
+    if (!declared || !ORACLE_SUPPORTED_IMAGE_MIME_TYPES.has(declared)) {
+      return void 0;
+    }
+    return { type: "IMAGE", imageUrl: { url: data, detail: "AUTO" } };
+  }
+  const mimeType = normalizeOracleImageMimeType(block.mimeType);
+  if (!mimeType || !ORACLE_SUPPORTED_IMAGE_MIME_TYPES.has(mimeType)) {
+    return void 0;
+  }
+  return { type: "IMAGE", imageUrl: { url: `data:${mimeType};base64,${data}`, detail: "AUTO" } };
 }
 function toOracleContentBlocks(content) {
   if (typeof content === "string") {
