@@ -21,7 +21,7 @@ import {
   resolveOracleAuth,
 } from "./oci-auth.js";
 import { ORACLE_GENERATIVE_AI_RETRY_CONFIGURATION } from "./oci-retry.js";
-import { isOracleCatalogModelVisible } from "./oci-routing.js";
+import { doesOracleModelSupportImages, isOracleCatalogModelVisible } from "./oci-routing.js";
 
 const ORACLE_BASE_URL = "oci://generative-ai";
 
@@ -138,7 +138,7 @@ export function buildOracleModelDefinition(modelId: string, name = modelId): Mod
     id: modelId,
     name,
     reasoning: false,
-    input: ["text"],
+    input: doesOracleModelSupportImages(modelId) ? ["text", "image"] : ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: DEFAULT_CONTEXT_TOKENS,
     maxTokens: DEFAULT_CONTEXT_TOKENS,

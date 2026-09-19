@@ -118869,6 +118869,13 @@ var ORACLE_GENERATIVE_AI_RETRY_CONFIGURATION = {
 };
 
 // oci-routing.ts
+var ORACLE_VISION_MODEL_PATTERNS = [
+  /^openai\.gpt-4o(?:$|[-.])/,
+  /^openai\.gpt-4\.1(?:$|[-.])/,
+  /^openai\.gpt-5(?:$|[-.])/,
+  /^google\.gemini(?:$|[-.])/,
+  /^meta\.llama-4(?:$|[-.])/
+];
 var ORACLE_HIDDEN_ON_DEMAND_MODELS = /* @__PURE__ */ new Set([
   "cohere.command-a-reasoning",
   "cohere.command-r-16k",
@@ -118901,6 +118908,12 @@ function resolveOracleChatApiFormat(modelId) {
   }
   return "COHERE";
 }
+function resolveOracleImageSupport(modelId, apiFormat) {
+  if (apiFormat !== "GENERIC" || !modelId) {
+    return false;
+  }
+  return ORACLE_VISION_MODEL_PATTERNS.some((pattern) => pattern.test(modelId));
+}
 function resolveOracleModelRouting(modelId) {
   const normalized = normalizeOracleModelId(modelId);
   const apiFormat = resolveOracleChatApiFormat(normalized);
@@ -118908,11 +118921,15 @@ function resolveOracleModelRouting(modelId) {
     apiFormat,
     family: apiFormat === "COHERE" ? "cohere" : apiFormat === "COHEREV2" ? "cohere-v2" : "generic",
     outputTokenField: apiFormat === "GENERIC" && normalized?.startsWith("openai.") ? "maxCompletionTokens" : "maxTokens",
-    catalogVisible: normalized ? !ORACLE_HIDDEN_ON_DEMAND_MODELS.has(normalized) : true
+    catalogVisible: normalized ? !ORACLE_HIDDEN_ON_DEMAND_MODELS.has(normalized) : true,
+    supportsImages: resolveOracleImageSupport(normalized, apiFormat)
   };
 }
 function isOracleCatalogModelVisible(modelId) {
   return resolveOracleModelRouting(modelId).catalogVisible;
+}
+function doesOracleModelSupportImages(modelId) {
+  return resolveOracleModelRouting(modelId).supportsImages;
 }
 
 // oci-stream.ts
@@ -119431,6 +119448,49 @@ function toOracleTextBlocks(content) {
   const text = toTextParts(content).join("\n").trim();
   return text ? [{ type: "TEXT", text }] : void 0;
 }
+function toOracleImageBlock(block) {
+  const data = typeof block.data === "string" ? block.data.trim() : "";
+  if (!data) {
+    return void 0;
+  }
+  const url = data.startsWith("data:") ? data : `data:${typeof block.mimeType === "string" && block.mimeType ? block.mimeType : "image/png"};base64,${data}`;
+  return { type: "IMAGE", imageUrl: { url, detail: "AUTO" } };
+}
+function toOracleContentBlocks(content) {
+  if (typeof content === "string") {
+    const text = content.trim();
+    return text ? [{ type: "TEXT", text }] : void 0;
+  }
+  if (!Array.isArray(content)) {
+    return void 0;
+  }
+  const blocks = [];
+  const pendingText = [];
+  const flushText = () => {
+    const text = pendingText.join("\n").trim();
+    pendingText.length = 0;
+    if (text) {
+      blocks.push({ type: "TEXT", text });
+    }
+  };
+  for (const block of content) {
+    if ((block.type === "text" || block.type === "input_text" || block.type === "output_text") && typeof block.text === "string") {
+      pendingText.push(block.text);
+      continue;
+    }
+    if (block.type === "image" || block.type === "input_image") {
+      const imageBlock = toOracleImageBlock(block);
+      if (imageBlock) {
+        flushText();
+        blocks.push(imageBlock);
+      } else {
+        pendingText.push("[Image omitted]");
+      }
+    }
+  }
+  flushText();
+  return blocks.length > 0 ? blocks : void 0;
+}
 function isOracleToolUseBlockType(type) {
   return type === "toolUse" || type === "tool_use";
 }
@@ -119549,6 +119609,7 @@ function tryConvertGeminiAssistantToolSequence(params) {
 function convertPiMessagesToOracleMessages(params) {
   const oracleMessages = [];
   const useGeminiToolPairing = isOracleGeminiModelId(params.modelId);
+  const supportsImages = doesOracleModelSupportImages(params.modelId);
   if (params.systemPrompt?.trim()) {
     oracleMessages.push({
       role: "SYSTEM",
@@ -119558,7 +119619,7 @@ function convertPiMessagesToOracleMessages(params) {
   for (let index = 0; index < params.messages.length; index += 1) {
     const message = params.messages[index];
     if (message.role === "user") {
-      const content = toOracleTextBlocks(message.content);
+      const content = supportsImages ? toOracleContentBlocks(message.content) : toOracleTextBlocks(message.content);
       if (content) {
         oracleMessages.push({ role: "USER", content });
       }
@@ -120489,7 +120550,7 @@ function buildOracleModelDefinition(modelId, name = modelId) {
     id: modelId,
     name,
     reasoning: false,
-    input: ["text"],
+    input: doesOracleModelSupportImages(modelId) ? ["text", "image"] : ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: DEFAULT_CONTEXT_TOKENS,
     maxTokens: DEFAULT_CONTEXT_TOKENS
