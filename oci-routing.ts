@@ -9,7 +9,20 @@ export type OracleModelRouting = {
   family: OracleChatRequestFamily;
   outputTokenField: OracleOutputTokenField;
   catalogVisible: boolean;
+  supportsImages: boolean;
 };
+
+// Image blocks are only emitted on the GENERIC request path, so a model is
+// advertised as image-capable only when it is vision-capable upstream *and*
+// routed through that path. Cohere formats carry images differently and are
+// deliberately left out.
+const ORACLE_VISION_MODEL_PATTERNS: RegExp[] = [
+  /^openai\.gpt-4o(?:$|[-.])/,
+  /^openai\.gpt-4\.1(?:$|[-.])/,
+  /^openai\.gpt-5(?:$|[-.])/,
+  /^google\.gemini(?:$|[-.])/,
+  /^meta\.llama-4(?:$|[-.])/,
+];
 
 const ORACLE_HIDDEN_ON_DEMAND_MODELS = new Set([
   "cohere.command-a-reasoning",
@@ -53,6 +66,16 @@ function resolveOracleChatApiFormat(modelId: string | undefined): OracleChatApiF
   return "COHERE";
 }
 
+function resolveOracleImageSupport(
+  modelId: string | undefined,
+  apiFormat: OracleChatApiFormat,
+): boolean {
+  if (apiFormat !== "GENERIC" || !modelId) {
+    return false;
+  }
+  return ORACLE_VISION_MODEL_PATTERNS.some((pattern) => pattern.test(modelId));
+}
+
 export function resolveOracleModelRouting(modelId: string | undefined): OracleModelRouting {
   const normalized = normalizeOracleModelId(modelId);
   const apiFormat = resolveOracleChatApiFormat(normalized);
@@ -65,9 +88,14 @@ export function resolveOracleModelRouting(modelId: string | undefined): OracleMo
         ? "maxCompletionTokens"
         : "maxTokens",
     catalogVisible: normalized ? !ORACLE_HIDDEN_ON_DEMAND_MODELS.has(normalized) : true,
+    supportsImages: resolveOracleImageSupport(normalized, apiFormat),
   };
 }
 
 export function isOracleCatalogModelVisible(modelId: string | undefined): boolean {
   return resolveOracleModelRouting(modelId).catalogVisible;
+}
+
+export function doesOracleModelSupportImages(modelId: string | undefined): boolean {
+  return resolveOracleModelRouting(modelId).supportsImages;
 }

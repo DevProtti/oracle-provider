@@ -20,6 +20,7 @@ import {
 } from "./oci-auth.js";
 import { ORACLE_GENERATIVE_AI_RETRY_CONFIGURATION } from "./oci-retry.js";
 import {
+  doesOracleModelSupportImages,
   resolveOracleModelRouting,
   type OracleChatApiFormat,
   type OracleOutputTokenField,
@@ -31,6 +32,16 @@ type OracleTextBlock = {
   type: "TEXT";
   text: string;
 };
+
+type OracleImageBlock = {
+  type: "IMAGE";
+  imageUrl: {
+    url: string;
+    detail?: "AUTO";
+  };
+};
+
+type OracleContentBlock = OracleTextBlock | OracleImageBlock;
 
 type OracleCohereToolParameterDefinition = {
   type: string;
@@ -47,7 +58,7 @@ type OracleFunctionCall = {
 
 type OracleMessage = {
   role: OracleMessageRole;
-  content?: OracleTextBlock[];
+  content?: OracleContentBlock[];
   toolCallId?: string;
   toolCalls?: OracleFunctionCall[];
 };
@@ -944,6 +955,95 @@ function toOracleTextBlocks(content: unknown): OracleTextBlock[] | undefined {
   return text ? [{ type: "TEXT", text }] : undefined;
 }
 
+// Oracle rejects anything outside this set with "Image is corrupted or
+// unreadable", which fails the whole turn. Unsupported types fall back to the
+// previous placeholder behaviour instead.
+const ORACLE_SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/jpg"]);
+
+function normalizeOracleImageMimeType(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase().split(";")[0];
+  return normalized ? normalized : undefined;
+}
+
+function toOracleImageBlock(block: {
+  data?: unknown;
+  mimeType?: unknown;
+}): OracleImageBlock | undefined {
+  const data = typeof block.data === "string" ? block.data.trim() : "";
+  if (!data) {
+    return undefined;
+  }
+
+  if (data.startsWith("data:")) {
+    const declared = normalizeOracleImageMimeType(data.slice("data:".length).split(",")[0]);
+    if (!declared || !ORACLE_SUPPORTED_IMAGE_MIME_TYPES.has(declared)) {
+      return undefined;
+    }
+    return { type: "IMAGE", imageUrl: { url: data, detail: "AUTO" } };
+  }
+
+  const mimeType = normalizeOracleImageMimeType(block.mimeType);
+  if (!mimeType || !ORACLE_SUPPORTED_IMAGE_MIME_TYPES.has(mimeType)) {
+    return undefined;
+  }
+  return { type: "IMAGE", imageUrl: { url: `data:${mimeType};base64,${data}`, detail: "AUTO" } };
+}
+
+/**
+ * Like toOracleTextBlocks, but keeps image blocks instead of flattening them to
+ * a placeholder. Only used for user messages routed to image-capable models.
+ */
+function toOracleContentBlocks(content: unknown): OracleContentBlock[] | undefined {
+  if (typeof content === "string") {
+    const text = content.trim();
+    return text ? [{ type: "TEXT", text }] : undefined;
+  }
+  if (!Array.isArray(content)) {
+    return undefined;
+  }
+
+  const blocks: OracleContentBlock[] = [];
+  const pendingText: string[] = [];
+
+  const flushText = () => {
+    const text = pendingText.join("\n").trim();
+    pendingText.length = 0;
+    if (text) {
+      blocks.push({ type: "TEXT", text });
+    }
+  };
+
+  for (const block of content as Array<{
+    type?: string;
+    text?: string;
+    data?: unknown;
+    mimeType?: unknown;
+  }>) {
+    if (
+      (block.type === "text" || block.type === "input_text" || block.type === "output_text") &&
+      typeof block.text === "string"
+    ) {
+      pendingText.push(block.text);
+      continue;
+    }
+    if (block.type === "image" || block.type === "input_image") {
+      const imageBlock = toOracleImageBlock(block);
+      if (imageBlock) {
+        flushText();
+        blocks.push(imageBlock);
+      } else {
+        pendingText.push("[Image omitted]");
+      }
+    }
+  }
+
+  flushText();
+  return blocks.length > 0 ? blocks : undefined;
+}
+
 function isOracleToolUseBlockType(type: unknown): type is "toolUse" | "tool_use" {
   return type === "toolUse" || type === "tool_use";
 }
@@ -1123,6 +1223,7 @@ export function convertPiMessagesToOracleMessages(params: {
 }): OracleMessage[] {
   const oracleMessages: OracleMessage[] = [];
   const useGeminiToolPairing = isOracleGeminiModelId(params.modelId);
+  const supportsImages = doesOracleModelSupportImages(params.modelId);
 
   if (params.systemPrompt?.trim()) {
     oracleMessages.push({
@@ -1134,7 +1235,9 @@ export function convertPiMessagesToOracleMessages(params: {
   for (let index = 0; index < params.messages.length; index += 1) {
     const message = params.messages[index] as Message;
     if (message.role === "user") {
-      const content = toOracleTextBlocks(message.content);
+      const content = supportsImages
+        ? toOracleContentBlocks(message.content)
+        : toOracleTextBlocks(message.content);
       if (content) {
         oracleMessages.push({ role: "USER", content });
       }

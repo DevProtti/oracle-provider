@@ -30683,7 +30683,7 @@ var require_node = __commonJS({
     var tty = __require("tty");
     var util = __require("util");
     exports.init = init;
-    exports.log = log;
+    exports.log = log2;
     exports.formatArgs = formatArgs;
     exports.save = save;
     exports.load = load;
@@ -30818,7 +30818,7 @@ var require_node = __commonJS({
       }
       return (/* @__PURE__ */ new Date()).toISOString() + " ";
     }
-    function log(...args) {
+    function log2(...args) {
       return process.stderr.write(util.formatWithOptions(exports.inspectOpts, ...args) + "\n");
     }
     function save(namespaces) {
@@ -40257,7 +40257,7 @@ var require_logging_utils = __commonJS({
     exports.getDebugBackend = getDebugBackend;
     exports.getStructuredBackend = getStructuredBackend;
     exports.setBackend = setBackend;
-    exports.log = log;
+    exports.log = log2;
     var events_1 = __require("events");
     var process2 = __importStar(__require("process"));
     var util = __importStar(__require("util"));
@@ -40289,7 +40289,7 @@ var require_logging_utils = __commonJS({
         this.func.info = (...args) => this.invokeSeverity(LogSeverity.INFO, ...args);
         this.func.warn = (...args) => this.invokeSeverity(LogSeverity.WARNING, ...args);
         this.func.error = (...args) => this.invokeSeverity(LogSeverity.ERROR, ...args);
-        this.func.sublog = (namespace2) => log(namespace2, this.func);
+        this.func.sublog = (namespace2) => log2(namespace2, this.func);
       }
       invoke(fields, ...args) {
         if (this.upstream) {
@@ -40456,7 +40456,7 @@ var require_logging_utils = __commonJS({
       cachedBackend = backend;
       loggerCache.clear();
     }
-    function log(namespace, parent) {
+    function log2(namespace, parent) {
       if (!cachedBackend) {
         const enablesFlag = process2.env[exports.env.nodeEnables];
         if (!enablesFlag) {
@@ -40589,7 +40589,7 @@ var require_src4 = __commonJS({
     exports.HEADER_NAME = "Metadata-Flavor";
     exports.HEADER_VALUE = "Google";
     exports.HEADERS = Object.freeze({ [exports.HEADER_NAME]: exports.HEADER_VALUE });
-    var log = logger.log("gcp-metadata");
+    var log2 = logger.log("gcp-metadata");
     exports.METADATA_SERVER_DETECTION = Object.freeze({
       "assume-present": "don't try to ping the metadata server, but assume it's present",
       none: "don't try to ping the metadata server, but don't try to use it either",
@@ -40652,9 +40652,9 @@ var require_src4 = __commonJS({
         responseType: "text",
         timeout: requestTimeout()
       };
-      log.info("instance request %j", req);
+      log2.info("instance request %j", req);
       const res = await requestMethod(req);
-      log.info("instance metadata is %s", res.data);
+      log2.info("instance metadata is %s", res.data);
       const metadataFlavor = res.headers.get(exports.HEADER_NAME);
       if (metadataFlavor !== exports.HEADER_VALUE) {
         throw new RangeError(`Invalid response from metadata service: incorrect ${exports.HEADER_NAME} header. Expected '${exports.HEADER_VALUE}', got ${metadataFlavor ? `'${metadataFlavor}'` : "no header"}`);
@@ -115684,11 +115684,11 @@ var require_core = __commonJS({
     Ajv2.ValidationError = validation_error_1.default;
     Ajv2.MissingRefError = ref_error_1.default;
     exports.default = Ajv2;
-    function checkOptions(checkOpts, options, msg, log = "error") {
+    function checkOptions(checkOpts, options, msg, log2 = "error") {
       for (const key in checkOpts) {
         const opt = key;
         if (opt in options)
-          this.logger[log](`${msg}: option ${key}. ${checkOpts[opt]}`);
+          this.logger[log2](`${msg}: option ${key}. ${checkOpts[opt]}`);
       }
     }
     function getSchEnv(keyRef) {
@@ -118869,6 +118869,13 @@ var ORACLE_GENERATIVE_AI_RETRY_CONFIGURATION = {
 };
 
 // oci-routing.ts
+var ORACLE_VISION_MODEL_PATTERNS = [
+  /^openai\.gpt-4o(?:$|[-.])/,
+  /^openai\.gpt-4\.1(?:$|[-.])/,
+  /^openai\.gpt-5(?:$|[-.])/,
+  /^google\.gemini(?:$|[-.])/,
+  /^meta\.llama-4(?:$|[-.])/
+];
 var ORACLE_HIDDEN_ON_DEMAND_MODELS = /* @__PURE__ */ new Set([
   "cohere.command-a-reasoning",
   "cohere.command-r-16k",
@@ -118901,6 +118908,12 @@ function resolveOracleChatApiFormat(modelId) {
   }
   return "COHERE";
 }
+function resolveOracleImageSupport(modelId, apiFormat) {
+  if (apiFormat !== "GENERIC" || !modelId) {
+    return false;
+  }
+  return ORACLE_VISION_MODEL_PATTERNS.some((pattern) => pattern.test(modelId));
+}
 function resolveOracleModelRouting(modelId) {
   const normalized = normalizeOracleModelId(modelId);
   const apiFormat = resolveOracleChatApiFormat(normalized);
@@ -118908,11 +118921,15 @@ function resolveOracleModelRouting(modelId) {
     apiFormat,
     family: apiFormat === "COHERE" ? "cohere" : apiFormat === "COHEREV2" ? "cohere-v2" : "generic",
     outputTokenField: apiFormat === "GENERIC" && normalized?.startsWith("openai.") ? "maxCompletionTokens" : "maxTokens",
-    catalogVisible: normalized ? !ORACLE_HIDDEN_ON_DEMAND_MODELS.has(normalized) : true
+    catalogVisible: normalized ? !ORACLE_HIDDEN_ON_DEMAND_MODELS.has(normalized) : true,
+    supportsImages: resolveOracleImageSupport(normalized, apiFormat)
   };
 }
 function isOracleCatalogModelVisible(modelId) {
   return resolveOracleModelRouting(modelId).catalogVisible;
+}
+function doesOracleModelSupportImages(modelId) {
+  return resolveOracleModelRouting(modelId).supportsImages;
 }
 
 // oci-stream.ts
@@ -119431,6 +119448,67 @@ function toOracleTextBlocks(content) {
   const text = toTextParts(content).join("\n").trim();
   return text ? [{ type: "TEXT", text }] : void 0;
 }
+var ORACLE_SUPPORTED_IMAGE_MIME_TYPES = /* @__PURE__ */ new Set(["image/png", "image/jpeg", "image/jpg"]);
+function normalizeOracleImageMimeType(value) {
+  if (typeof value !== "string") {
+    return void 0;
+  }
+  const normalized = value.trim().toLowerCase().split(";")[0];
+  return normalized ? normalized : void 0;
+}
+function toOracleImageBlock(block) {
+  const data = typeof block.data === "string" ? block.data.trim() : "";
+  if (!data) {
+    return void 0;
+  }
+  if (data.startsWith("data:")) {
+    const declared = normalizeOracleImageMimeType(data.slice("data:".length).split(",")[0]);
+    if (!declared || !ORACLE_SUPPORTED_IMAGE_MIME_TYPES.has(declared)) {
+      return void 0;
+    }
+    return { type: "IMAGE", imageUrl: { url: data, detail: "AUTO" } };
+  }
+  const mimeType = normalizeOracleImageMimeType(block.mimeType);
+  if (!mimeType || !ORACLE_SUPPORTED_IMAGE_MIME_TYPES.has(mimeType)) {
+    return void 0;
+  }
+  return { type: "IMAGE", imageUrl: { url: `data:${mimeType};base64,${data}`, detail: "AUTO" } };
+}
+function toOracleContentBlocks(content) {
+  if (typeof content === "string") {
+    const text = content.trim();
+    return text ? [{ type: "TEXT", text }] : void 0;
+  }
+  if (!Array.isArray(content)) {
+    return void 0;
+  }
+  const blocks = [];
+  const pendingText = [];
+  const flushText = () => {
+    const text = pendingText.join("\n").trim();
+    pendingText.length = 0;
+    if (text) {
+      blocks.push({ type: "TEXT", text });
+    }
+  };
+  for (const block of content) {
+    if ((block.type === "text" || block.type === "input_text" || block.type === "output_text") && typeof block.text === "string") {
+      pendingText.push(block.text);
+      continue;
+    }
+    if (block.type === "image" || block.type === "input_image") {
+      const imageBlock = toOracleImageBlock(block);
+      if (imageBlock) {
+        flushText();
+        blocks.push(imageBlock);
+      } else {
+        pendingText.push("[Image omitted]");
+      }
+    }
+  }
+  flushText();
+  return blocks.length > 0 ? blocks : void 0;
+}
 function isOracleToolUseBlockType(type) {
   return type === "toolUse" || type === "tool_use";
 }
@@ -119549,6 +119627,7 @@ function tryConvertGeminiAssistantToolSequence(params) {
 function convertPiMessagesToOracleMessages(params) {
   const oracleMessages = [];
   const useGeminiToolPairing = isOracleGeminiModelId(params.modelId);
+  const supportsImages = doesOracleModelSupportImages(params.modelId);
   if (params.systemPrompt?.trim()) {
     oracleMessages.push({
       role: "SYSTEM",
@@ -119558,7 +119637,7 @@ function convertPiMessagesToOracleMessages(params) {
   for (let index = 0; index < params.messages.length; index += 1) {
     const message = params.messages[index];
     if (message.role === "user") {
-      const content = toOracleTextBlocks(message.content);
+      const content = supportsImages ? toOracleContentBlocks(message.content) : toOracleTextBlocks(message.content);
       if (content) {
         oracleMessages.push({ role: "USER", content });
       }
@@ -120421,8 +120500,9 @@ import {
   DEFAULT_CONTEXT_TOKENS,
   normalizeModelCompat
 } from "openclaw/plugin-sdk/provider-model-shared";
-import { logWarn } from "openclaw/plugin-sdk/text-runtime";
+import { createSubsystemLogger } from "openclaw/plugin-sdk/logging-core";
 var ORACLE_BASE_URL = "oci://generative-ai";
+var log = createSubsystemLogger("oracle");
 function trimToUndefined2(value) {
   if (typeof value !== "string") {
     return void 0;
@@ -120488,7 +120568,7 @@ function buildOracleModelDefinition(modelId, name = modelId) {
     id: modelId,
     name,
     reasoning: false,
-    input: ["text"],
+    input: doesOracleModelSupportImages(modelId) ? ["text", "image"] : ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: DEFAULT_CONTEXT_TOKENS,
     maxTokens: DEFAULT_CONTEXT_TOKENS
@@ -120566,7 +120646,7 @@ function handleOracleCatalogDiscoveryError(error) {
     return null;
   }
   const message = error.message.trim() || "unknown error";
-  logWarn(`oracle: catalog discovery failed, skipping provider: ${message}`);
+  log.warn(`catalog discovery failed, skipping provider: ${message}`);
   return null;
 }
 async function resolveOracleCatalogProvider(ctx) {
