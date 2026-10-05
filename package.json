@@ -1,5 +1,5 @@
 {
-  "name": "@gticiane/oracle-genai",
+  "name": "@devprotti/oracle-genai",
   "version": "2026.4.9",
   "description": "OpenClaw Oracle GenAI provider plugin",
   "type": "module",
@@ -41,7 +41,7 @@
       "./dist/index.js"
     ],
     "install": {
-      "clawhubSpec": "clawhub:@gticiane/oracle-genai",
+      "clawhubSpec": "clawhub:@devprotti/oracle-genai",
       "defaultChoice": "clawhub",
       "minHostVersion": ">=2026.6.8"
     },

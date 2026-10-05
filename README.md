@@ -29,7 +29,7 @@ Once Oracle authentication is configured, the plugin lists the models available 
 ## Install
 
 ```bash
-openclaw plugins install clawhub:@gticiane/oracle-genai --force
+openclaw plugins install clawhub:@devprotti/oracle-genai --force
 ```
 
 ## Configure
